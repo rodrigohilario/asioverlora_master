@@ -37,7 +37,10 @@ uint8_t masterrx_msg;
 tdma_state_t tdma_state = TDMA_ST_MASTERTX_SLAVERX;
 slave_ctrl_t slave_ctrl[NUM_OF_SLAVES] = {0};
 bool new_message_arrived = false;
+bool set_new_slave_address_needed = false;
+uint8_t new_slave_address = 0;
 
+/* Private functions */
 void lora_rx_done_callback(uint8_t* buffer_rx, int pac_size)
 {
 	memset(&masterrx_msg, 0, sizeof(masterrx_msg));
@@ -62,6 +65,11 @@ uint8_t get_next_available_slave (uint8_t current_slave_address)
 bool is_erase_slave_address_needed (uint8_t slave_address)
 {
 	return slave_ctrl[slave_address].erase_address_cmd;
+}
+
+bool is_set_new_slave_address_needed ()
+{
+	return set_new_slave_address_needed;
 }
 
 void parse_io_cmd_message (uint8_t slave_address, uint8_t* message)
@@ -128,14 +136,14 @@ void parse_erase_address_cmd_message (uint8_t slave_address, uint8_t* message)
 	*message = msb_message;
 }
 
-void parse_set_new_address_cmd_message (uint8_t slave_address, uint8_t* message)
+void parse_set_new_address_cmd_message (uint8_t new_slave_address, uint8_t* message)
 {
 	uint16_t raw_message = 0;
 
 	uint16_t start_bit = 0;
 	uint16_t command_bit = 0;
 	uint16_t address_bits = 0;
-	uint16_t data_bits = ((uint16_t)slave_address) & 0x001F;
+	uint16_t data_bits = ((uint16_t)new_slave_address) & 0x001F;
 
 	raw_message |= start_bit << 0;
 	raw_message |= command_bit << 1;
@@ -176,7 +184,14 @@ void parse_received_message_from_slave (uint8_t slave_address, uint8_t message)
 
 void execute_user_program ()
 {
-	//TODO Implement user program logic
+	slave_ctrl[1].outputs[2] = slave_ctrl[2].inputs[0];
+	slave_ctrl[1].outputs[3] = slave_ctrl[3].inputs[1];
+
+	slave_ctrl[2].outputs[2] = slave_ctrl[3].inputs[0];
+	slave_ctrl[2].outputs[3] = slave_ctrl[1].inputs[1];
+
+	slave_ctrl[3].outputs[2] = slave_ctrl[1].inputs[0];
+	slave_ctrl[3].outputs[3] = slave_ctrl[2].inputs[1];
 }
 
 void tdma(void *p)
@@ -184,17 +199,33 @@ void tdma(void *p)
 	uint32_t tick_timeout = 0;
 	uint8_t current_slave_adress = 0;
 
+	/* Initial scan for detects available slaves */
+	// TODO
+	/* ... */
+
 	for(;;) {
 		switch (tdma_state) {
 			case TDMA_ST_MASTERTX_SLAVERX:
 				memset(mastertx_msg, 0, sizeof(mastertx_msg));
 
 				/* Prepare the message to be transmitted to the slave N */
-				if (is_erase_slave_address_needed(current_slave_adress)) {
-					parse_erase_address_cmd_message(current_slave_adress, mastertx_msg);
+				if (current_slave_adress != 0) {
+					/* Non-zero address slave */
+					if (is_erase_slave_address_needed(current_slave_adress)) {
+						parse_erase_address_cmd_message(current_slave_adress, mastertx_msg);
+					}
+					else {
+						parse_io_cmd_message(current_slave_adress, mastertx_msg);
+					}
 				}
 				else {
-					parse_io_cmd_message(current_slave_adress, mastertx_msg);
+					/* Zero address slave */
+					if (is_set_new_slave_address_needed() == true) {
+						parse_set_new_address_cmd_message(new_slave_address, mastertx_msg);
+					}
+					else {
+						parse_io_cmd_message(current_slave_adress, mastertx_msg);
+					}
 				}
 
 				lora_send_packet(mastertx_msg, sizeof(mastertx_msg));
@@ -205,7 +236,7 @@ void tdma(void *p)
 				break;
 
 			case TDMA_ST_MASTERRX_SLAVETX:
-				if (tick_timeout - xTaskGetTickCount() >= pdMS_TO_TICKS(100)) {
+				if (xTaskGetTickCount() - tick_timeout >= pdMS_TO_TICKS(100)) {
 					/* Time to listen slave N transmission has expired
 					 * Pass to the next slave available on the network */
 					tdma_state = TDMA_ST_CHECK_NEXT_SLAVE;
