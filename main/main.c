@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -6,15 +7,19 @@
 
 #include "lora.h"
 
+#include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
+
+#include "driver/uart.h"
+#include "driver/gpio.h"
 
 /* Private definitions and enumerations */
 #define MASTERTX_SLAVERX_MSG_SIZE	2
 #define NUM_OF_SLAVES				32
+#define UART_RX_BUFFER_SIZE			256
 
 typedef enum {
 	TDMA_ST_MASTERTX_SLAVERX = 0,
@@ -194,7 +199,72 @@ void execute_user_program ()
 	slave_ctrl[3].outputs[3] = slave_ctrl[2].inputs[1];
 }
 
-void tdma(void *p)
+void uart_interface_task(void *p)
+{
+    uint8_t data[ UART_RX_BUFFER_SIZE + 1 ] = {0};
+    int uart_rxBytes = 0;
+
+    static const char *uart_interface_task_tag = "uart_interface_task";
+    esp_log_level_set(uart_interface_task_tag, ESP_LOG_INFO);
+
+    /* There are two possible commands receivable:
+     * <> Erase Slave Address	->	ERSADDRXX
+     * <> Set New Slave Address	->	SETADDRXX
+     * Where XX is the address of the slave (1 - 31)
+     * */
+    for (;;) {
+        uart_rxBytes = uart_read_bytes(UART_NUM_0, data, UART_RX_BUFFER_SIZE, 100 / portTICK_RATE_MS);
+        if (uart_rxBytes > 0) {
+            data[uart_rxBytes] = 0;
+
+            if ( strncmp( "ERSADDR" , data , 7 ) == 0 ) {
+            	int address_to_erase = atoi( data + 7 );
+            	/* Check if the address is valid (1 - 31) */
+            	if ( (address_to_erase >= 1) && (address_to_erase <= 31) ) {
+            		/* Check if the slave is available in the network */
+            		if ( slave_ctrl[address_to_erase].available_slave ) {
+            			slave_ctrl[address_to_erase].erase_address_cmd = true;
+                        ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address %i scheduled to be erased", address_to_erase);
+            		}
+            		else {
+                        ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address not available");
+            		}
+            	}
+            	else {
+                    ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address invalid");
+            	}
+            }
+            else if ( strncmp( "SETADDR" , data , 7 ) == 0 ) {
+            	int new_address_to_set = atoi( data + 7 );
+            	/* Check if the address is valid (1 - 31) */
+            	if ( (new_address_to_set >= 1) && (new_address_to_set <= 31) ) {
+            		/* Check if the slave isn't available in the network */
+            		if ( !(slave_ctrl[new_address_to_set].available_slave) ) {
+            			new_slave_address = (uint8_t)new_address_to_set;
+            			set_new_slave_address_needed = true;
+                        ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address %i scheduled to be assigned", new_address_to_set);
+            		}
+            		else {
+                        ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address already in use");
+            		}
+            	}
+            	else {
+                    ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address invalid");
+            	}
+            }
+
+            ESP_LOGI(uart_interface_task_tag, "Read %d bytes: '%s'", uart_rxBytes, data);
+            ESP_LOG_BUFFER_HEXDUMP(uart_interface_task_tag, data, uart_rxBytes, ESP_LOG_INFO);
+
+            const int txBytes = uart_write_bytes(UART_NUM_0, (char*)data, uart_rxBytes);
+            ESP_LOGI(uart_interface_task_tag, "Wrote %d bytes", txBytes);
+
+        }
+		vTaskDelay(1);
+    }
+}
+
+void tdma_task(void *p)
 {
 	uint32_t tick_timeout = 0;
 	uint8_t current_slave_adress = 0;
@@ -277,6 +347,7 @@ void tdma(void *p)
 
 void app_main()
 {
+	/* Non Volatile Storage initialization */
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 		ESP_ERROR_CHECK(nvs_flash_erase());
@@ -284,6 +355,7 @@ void app_main()
 	}
 	ESP_ERROR_CHECK(ret);
 
+	/* LoRa initialization */
 	lora_init();
 	lora_set_frequency(915e6);
 	lora_set_bandwidth(500e3);
@@ -291,5 +363,33 @@ void app_main()
 	lora_enable_crc();
 	lora_onReceive(&lora_rx_done_callback);
 
-	xTaskCreatePinnedToCore(&tdma, "tdma", 8192, NULL, 5, NULL, 1);
+	/* UART interface initialization */
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
+    uart_param_config(UART_NUM_0, &uart_config);
+    uart_set_pin(UART_NUM_0, GPIO_NUM_1, GPIO_NUM_3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    // We won't use a buffer for sending data.
+    uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
+    /* UART user interface task initialization */
+    xTaskCreatePinnedToCore(&uart_interface_task,
+    		"uart_interface",
+			8192,
+			NULL,
+			6,
+			NULL,
+			1);
+
+    /* Time division multiple access task initialization */
+	xTaskCreatePinnedToCore(&tdma_task,
+			"tdma",
+			8192,
+			NULL,
+			5,
+			NULL,
+			1);
 }
