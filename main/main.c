@@ -41,6 +41,7 @@ uint8_t masterrx_msg;
 
 tdma_state_t tdma_state = TDMA_ST_MASTERTX_SLAVERX;
 slave_ctrl_t slave_ctrl[NUM_OF_SLAVES] = {0};
+bool initial_scan_done = false;
 bool new_message_arrived = false;
 bool set_new_slave_address_needed = false;
 uint8_t new_slave_address = 0;
@@ -55,14 +56,16 @@ void lora_rx_done_callback(uint8_t* buffer_rx, int pac_size)
 
 uint8_t get_next_available_slave (uint8_t current_slave_address)
 {
-	uint8_t next_available_slave_address = current_slave_address + 1;
+	uint8_t next_available_slave_address = current_slave_address;
 
 	/* Check which is the next available slave */
-	while( slave_ctrl[next_available_slave_address].available_slave == false ) {
+	do {
 		next_available_slave_address++;
 		if (next_available_slave_address >= NUM_OF_SLAVES)
 			next_available_slave_address = 0;
-	}
+		else if (next_available_slave_address == current_slave_address)
+			return 0;
+	} while( slave_ctrl[next_available_slave_address].available_slave == false );
 
 	return next_available_slave_address;
 }
@@ -201,30 +204,43 @@ void execute_user_program ()
 
 void uart_interface_task(void *p)
 {
+	while (!initial_scan_done) {
+		vTaskDelay(1);
+	}
+
     uint8_t data[ UART_RX_BUFFER_SIZE + 1 ] = {0};
     int uart_rxBytes = 0;
+    uint32_t last_slave_info_print_tick = xTaskGetTickCount();
 
     static const char *uart_interface_task_tag = "uart_interface_task";
     esp_log_level_set(uart_interface_task_tag, ESP_LOG_INFO);
 
     /* There are two possible commands receivable:
-     * <> Erase Slave Address	->	ERSADDRXX
-     * <> Set New Slave Address	->	SETADDRXX
-     * Where XX is the address of the slave (1 - 31)
+     * <> Erase Slave Address	->	ERSADDRxx
+     * <> Set New Slave Address	->	SETADDRxx
+     * Where xx is the address of the slave (1 - 31)
      * */
     for (;;) {
+
+    	/* UART command parser mechanism */
         uart_rxBytes = uart_read_bytes(UART_NUM_0, data, UART_RX_BUFFER_SIZE, 100 / portTICK_RATE_MS);
         if (uart_rxBytes > 0) {
             data[uart_rxBytes] = 0;
 
-            if ( strncmp( "ERSADDR" , data , 7 ) == 0 ) {
-            	int address_to_erase = atoi( data + 7 );
+            if ( strncmp( "ERSADDR" , (char*)data , 7 ) == 0 ) {
+            	int address_to_erase = atoi( (char*)(data + 7) );
             	/* Check if the address is valid (1 - 31) */
-            	if ( (address_to_erase >= 1) && (address_to_erase <= 31) ) {
+            	if ( (address_to_erase > 0) && (address_to_erase < NUM_OF_SLAVES) ) {
             		/* Check if the slave is available in the network */
             		if ( slave_ctrl[address_to_erase].available_slave ) {
-            			slave_ctrl[address_to_erase].erase_address_cmd = true;
-                        ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address %i scheduled to be erased", address_to_erase);
+            			/* Check if the slave 0 isn't available in the network */
+            			if ( !(slave_ctrl[0].available_slave) ) {
+            				slave_ctrl[address_to_erase].erase_address_cmd = true;
+            				ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address %i scheduled to be erased", address_to_erase);
+            			}
+            			else {
+                            ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address 00 is already available");
+            			}
             		}
             		else {
                         ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address not available");
@@ -234,15 +250,21 @@ void uart_interface_task(void *p)
                     ESP_LOGI(uart_interface_task_tag, "Received Erase Address CMD: Address invalid");
             	}
             }
-            else if ( strncmp( "SETADDR" , data , 7 ) == 0 ) {
-            	int new_address_to_set = atoi( data + 7 );
+            else if ( strncmp( "SETADDR" , (char*)data , 7 ) == 0 ) {
+            	int new_address_to_set = atoi( (char*)(data + 7) );
             	/* Check if the address is valid (1 - 31) */
-            	if ( (new_address_to_set >= 1) && (new_address_to_set <= 31) ) {
+            	if ( (new_address_to_set > 0) && (new_address_to_set < NUM_OF_SLAVES) ) {
             		/* Check if the slave isn't available in the network */
             		if ( !(slave_ctrl[new_address_to_set].available_slave) ) {
-            			new_slave_address = (uint8_t)new_address_to_set;
-            			set_new_slave_address_needed = true;
-                        ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address %i scheduled to be assigned", new_address_to_set);
+            			/* Check if the slave 0 is available in the network */
+            			if (slave_ctrl[0].available_slave) {
+            				new_slave_address = (uint8_t)new_address_to_set;
+            				set_new_slave_address_needed = true;
+            				ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address %i scheduled to be assigned", new_address_to_set);
+            			}
+            			else {
+                            ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address 00 isn't available");
+            			}
             		}
             		else {
                         ESP_LOGI(uart_interface_task_tag, "Received Set New Address CMD: Address already in use");
@@ -253,13 +275,42 @@ void uart_interface_task(void *p)
             	}
             }
 
-            ESP_LOGI(uart_interface_task_tag, "Read %d bytes: '%s'", uart_rxBytes, data);
-            ESP_LOG_BUFFER_HEXDUMP(uart_interface_task_tag, data, uart_rxBytes, ESP_LOG_INFO);
-
-            const int txBytes = uart_write_bytes(UART_NUM_0, (char*)data, uart_rxBytes);
-            ESP_LOGI(uart_interface_task_tag, "Wrote %d bytes", txBytes);
-
+            memset(data, 0, sizeof(data));
         }
+
+        /* UART slaves info printer mechanism */
+		if (xTaskGetTickCount() - last_slave_info_print_tick >= pdMS_TO_TICKS(2000)) {
+			last_slave_info_print_tick = xTaskGetTickCount();
+			printf(LOG_COLOR(LOG_COLOR_RED));
+			printf("\n");
+			printf("##########################################\n");
+			printf("#            SLAVE INFO PRINT            #\n");
+			printf("##########################################\n");
+			printf("#ADDRESS #     INPUTS    #    OUTPUTS    #\n");
+			printf("#        # 0 # 1 # 2 # 3 # 0 # 1 # 2 # 3 #\n");
+			printf("##########################################\n");
+			if (slave_ctrl[0].available_slave) {
+				printf("#SLV 00  # Use SETADDRXX to set new addr #\n");
+				printf("##########################################\n");
+			}
+			for ( uint8_t i = 1 ; i < NUM_OF_SLAVES ; i++ ) {
+				if (slave_ctrl[i].available_slave) {
+					printf("#SLV %.2u  # %u # %u # %u # %u # %u # %u # %u # %u #\n",
+							(unsigned int)i,
+							(unsigned int)slave_ctrl[i].inputs[0],
+							(unsigned int)slave_ctrl[i].inputs[1],
+							(unsigned int)slave_ctrl[i].inputs[2],
+							(unsigned int)slave_ctrl[i].inputs[3],
+							(unsigned int)slave_ctrl[i].outputs[0],
+							(unsigned int)slave_ctrl[i].outputs[1],
+							(unsigned int)slave_ctrl[i].outputs[2],
+							(unsigned int)slave_ctrl[i].outputs[3]);
+					printf("##########################################\n");
+				}
+			}
+			printf(LOG_RESET_COLOR);
+		}
+
 		vTaskDelay(1);
     }
 }
@@ -270,19 +321,44 @@ void tdma_task(void *p)
 	uint8_t current_slave_adress = 0;
 
 	/* Initial scan for detects available slaves */
-	// TODO
-	/* ... */
+	uint8_t slaves_founds = 0;
+	printf(LOG_COLOR(LOG_COLOR_CYAN));
+	printf("\nInitial scan for detecting available slaves\n");
+	for ( uint8_t i = 0 ; i < NUM_OF_SLAVES ; i++ ) {
+		new_message_arrived = false;
+		memset(mastertx_msg, 0, sizeof(mastertx_msg));
+		parse_io_cmd_message(i, mastertx_msg);
+		lora_send_packet(mastertx_msg, sizeof(mastertx_msg));
+		lora_receive();
+		tick_timeout = xTaskGetTickCount();
+		printf("Initial scan slave %u", (unsigned int)i);
+		while (xTaskGetTickCount() - tick_timeout < pdMS_TO_TICKS(200)) {
+			if (new_message_arrived) {
+				slave_ctrl[i].available_slave = true;
+				printf(" - available");
+				slaves_founds++;
+				break;
+			}
+			vTaskDelay(1);
+		}
+		printf("\n");
+	}
+	printf("Initial scan found %u slaves\n", (unsigned int)slaves_founds);
+	printf(LOG_RESET_COLOR);
+	initial_scan_done = true;
 
 	for(;;) {
 		switch (tdma_state) {
 			case TDMA_ST_MASTERTX_SLAVERX:
 				memset(mastertx_msg, 0, sizeof(mastertx_msg));
+				new_message_arrived = false;
 
 				/* Prepare the message to be transmitted to the slave N */
 				if (current_slave_adress != 0) {
 					/* Non-zero address slave */
 					if (is_erase_slave_address_needed(current_slave_adress)) {
 						parse_erase_address_cmd_message(current_slave_adress, mastertx_msg);
+						slave_ctrl[0].available_slave = true;
 					}
 					else {
 						parse_io_cmd_message(current_slave_adress, mastertx_msg);
@@ -290,8 +366,10 @@ void tdma_task(void *p)
 				}
 				else {
 					/* Zero address slave */
-					if (is_set_new_slave_address_needed() == true) {
+					if (is_set_new_slave_address_needed()) {
 						parse_set_new_address_cmd_message(new_slave_address, mastertx_msg);
+						slave_ctrl[0].available_slave = false;
+						slave_ctrl[new_slave_address].available_slave = true;
 					}
 					else {
 						parse_io_cmd_message(current_slave_adress, mastertx_msg);
@@ -316,14 +394,19 @@ void tdma_task(void *p)
 					 * If true, update the inputs table and then
 					 * pass to the next slave available on the network */
 					if (new_message_arrived) {
-						new_message_arrived = false;
-						parse_received_message_from_slave(current_slave_adress, masterrx_msg);
+						if ( current_slave_adress != 0) {
+							parse_received_message_from_slave(current_slave_adress, masterrx_msg);
+						}
+						else {
+							slave_ctrl[0].available_slave = true;
+						}
 						tdma_state = TDMA_ST_CHECK_NEXT_SLAVE;
 					}
 				}
 				break;
 
 			case TDMA_ST_CHECK_NEXT_SLAVE:
+				/* Verify if the scan is complete */
 				if (get_next_available_slave(current_slave_adress) <= current_slave_adress) {
 					tdma_state = TDMA_ST_EXEC_USER_PROGRAM;
 				}
@@ -374,13 +457,14 @@ void app_main()
     uart_param_config(UART_NUM_0, &uart_config);
     uart_set_pin(UART_NUM_0, GPIO_NUM_1, GPIO_NUM_3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     // We won't use a buffer for sending data.
-    uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
+    uart_driver_install(UART_NUM_0, UART_RX_BUFFER_SIZE, 0, 0, NULL, 0);
+
     /* UART user interface task initialization */
     xTaskCreatePinnedToCore(&uart_interface_task,
     		"uart_interface",
 			8192,
 			NULL,
-			6,
+			6, // TODO Analyze the possible use of configMAX_PRIORITIES
 			NULL,
 			1);
 
@@ -392,4 +476,16 @@ void app_main()
 			5,
 			NULL,
 			1);
+
+//    EXAMPLE
+//    slave_ctrl[0].available_slave = true;
+//
+//    slave_ctrl[5].available_slave = true;
+//    slave_ctrl[5].inputs[1] = true;
+//    slave_ctrl[5].outputs[2] = true;
+//
+//    slave_ctrl[27].available_slave = true;
+//    slave_ctrl[27].inputs[2] = true;
+//    slave_ctrl[27].outputs[3] = true;
+
 }
