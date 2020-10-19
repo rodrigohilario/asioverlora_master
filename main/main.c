@@ -88,10 +88,10 @@ void parse_io_cmd_message (uint8_t slave_address, uint8_t* message)
 	uint16_t command_bit = 0;
 	uint16_t address_bits = ((uint16_t)slave_address) & 0x001F;
 	uint16_t data_bits = 0;
-	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[0])) & 0x0001) << 1;
-	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[1])) & 0x0001) << 2;
-	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[2])) & 0x0001) << 3;
-	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[3])) & 0x0001) << 4;
+	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[3])) & 0x0001) << 1;
+	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[2])) & 0x0001) << 2;
+	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[1])) & 0x0001) << 3;
+	data_bits |= (((uint16_t)(slave_ctrl[slave_address].outputs[0])) & 0x0001) << 4;
 
 	raw_message |= start_bit << 0;
 	raw_message |= command_bit << 1;
@@ -183,10 +183,10 @@ void parse_received_message_from_slave (uint8_t slave_address, uint8_t message)
 	uint8_t parity_bit_calculated = number_of_ones % 2;
 	uint8_t parity_bit_from_msg = (message >> 5) & 0x01;
 	if (parity_bit_from_msg == parity_bit_calculated) {
-		slave_ctrl[slave_address].inputs[0] = (bool)((message >> 1) & 0x01);
-		slave_ctrl[slave_address].inputs[1] = (bool)((message >> 2) & 0x01);
-		slave_ctrl[slave_address].inputs[2] = (bool)((message >> 3) & 0x01);
-		slave_ctrl[slave_address].inputs[3] = (bool)((message >> 4) & 0x01);
+		slave_ctrl[slave_address].inputs[3] = (bool)((message >> 1) & 0x01);
+		slave_ctrl[slave_address].inputs[2] = (bool)((message >> 2) & 0x01);
+		slave_ctrl[slave_address].inputs[1] = (bool)((message >> 3) & 0x01);
+		slave_ctrl[slave_address].inputs[0] = (bool)((message >> 4) & 0x01);
 	}
 }
 
