@@ -45,13 +45,18 @@ bool initial_scan_done = false;
 bool new_message_arrived = false;
 bool set_new_slave_address_needed = false;
 uint8_t new_slave_address = 0;
+uint32_t scan_last_time = 0;
+uint32_t scan_total_time = 0;
 
 /* Private functions */
 void lora_rx_done_callback(uint8_t* buffer_rx, int pac_size)
 {
-	memset(&masterrx_msg, 0, sizeof(masterrx_msg));
-	memcpy(&masterrx_msg, buffer_rx, sizeof(masterrx_msg));
-	new_message_arrived = true;
+	/* Master must receive packets only from the slaves */
+	if ( pac_size == 1 ){
+		masterrx_msg = *buffer_rx;
+		new_message_arrived = true;
+	}
+	lora_receive_from_isr();
 }
 
 uint8_t get_next_available_slave (uint8_t current_slave_address)
@@ -106,6 +111,10 @@ void parse_io_cmd_message (uint8_t slave_address, uint8_t* message)
 	uint16_t end_bit = 1;
 	raw_message |= parity_bit << 12;
 	raw_message |= end_bit << 13;
+
+#ifdef DEBUG
+	printf("Master sent msg: %04X\n", (unsigned int)(raw_message));
+#endif
 
 	uint8_t lsb_message = (uint8_t)(raw_message & 0x00FF);
 	uint8_t msb_message = (uint8_t)((raw_message >> 8) & 0x00FF);
@@ -183,6 +192,9 @@ void parse_received_message_from_slave (uint8_t slave_address, uint8_t message)
 	uint8_t parity_bit_calculated = number_of_ones % 2;
 	uint8_t parity_bit_from_msg = (message >> 5) & 0x01;
 	if (parity_bit_from_msg == parity_bit_calculated) {
+#ifdef DEBUG
+		printf("Parsed slave msg: %u\n", (unsigned int)message);
+#endif
 		slave_ctrl[slave_address].inputs[3] = (bool)((message >> 1) & 0x01);
 		slave_ctrl[slave_address].inputs[2] = (bool)((message >> 2) & 0x01);
 		slave_ctrl[slave_address].inputs[1] = (bool)((message >> 3) & 0x01);
@@ -308,6 +320,8 @@ void uart_interface_task(void *p)
 					printf("##########################################\n");
 				}
 			}
+			printf("#         LAST SCAN TIME: %6u         #\n", (unsigned int)scan_total_time);
+			printf("##########################################\n");
 			printf(LOG_RESET_COLOR);
 		}
 
@@ -324,7 +338,7 @@ void tdma_task(void *p)
 	uint8_t slaves_founds = 0;
 	printf(LOG_COLOR(LOG_COLOR_CYAN));
 	printf("\nInitial scan for detecting available slaves\n");
-	for ( uint8_t i = 0 ; i < NUM_OF_SLAVES ; i++ ) {
+	for ( uint8_t i = 1 ; i < NUM_OF_SLAVES ; i++ ) {
 		new_message_arrived = false;
 		memset(mastertx_msg, 0, sizeof(mastertx_msg));
 		parse_io_cmd_message(i, mastertx_msg);
@@ -342,6 +356,7 @@ void tdma_task(void *p)
 			vTaskDelay(1);
 		}
 		printf("\n");
+		vTaskDelay(10);
 	}
 	printf("Initial scan found %u slaves\n", (unsigned int)slaves_founds);
 	printf(LOG_RESET_COLOR);
@@ -359,6 +374,8 @@ void tdma_task(void *p)
 					if (is_erase_slave_address_needed(current_slave_adress)) {
 						parse_erase_address_cmd_message(current_slave_adress, mastertx_msg);
 						slave_ctrl[0].available_slave = true;
+						slave_ctrl[current_slave_adress].available_slave = false;
+						slave_ctrl[current_slave_adress].erase_address_cmd = false;
 					}
 					else {
 						parse_io_cmd_message(current_slave_adress, mastertx_msg);
@@ -370,9 +387,13 @@ void tdma_task(void *p)
 						parse_set_new_address_cmd_message(new_slave_address, mastertx_msg);
 						slave_ctrl[0].available_slave = false;
 						slave_ctrl[new_slave_address].available_slave = true;
+						set_new_slave_address_needed = false;
 					}
 					else {
-						parse_io_cmd_message(current_slave_adress, mastertx_msg);
+						/* Do not send IO message for slave 0 */
+						//parse_io_cmd_message(current_slave_adress, mastertx_msg);
+						tdma_state = TDMA_ST_CHECK_NEXT_SLAVE;
+						break;
 					}
 				}
 
@@ -384,10 +405,13 @@ void tdma_task(void *p)
 				break;
 
 			case TDMA_ST_MASTERRX_SLAVETX:
-				if (xTaskGetTickCount() - tick_timeout >= pdMS_TO_TICKS(100)) {
+				if (xTaskGetTickCount() - tick_timeout >= pdMS_TO_TICKS(200)) {
 					/* Time to listen slave N transmission has expired
 					 * Pass to the next slave available on the network */
 					tdma_state = TDMA_ST_CHECK_NEXT_SLAVE;
+#ifdef DEBUG
+					printf("Timed out slave %u", (unsigned int)current_slave_adress);
+#endif
 				}
 				else {
 					/* Verify if the master has received a message
@@ -398,7 +422,7 @@ void tdma_task(void *p)
 							parse_received_message_from_slave(current_slave_adress, masterrx_msg);
 						}
 						else {
-							slave_ctrl[0].available_slave = true;
+							//slave_ctrl[0].available_slave = true;
 						}
 						tdma_state = TDMA_ST_CHECK_NEXT_SLAVE;
 					}
@@ -417,6 +441,8 @@ void tdma_task(void *p)
 				break;
 
 			case TDMA_ST_EXEC_USER_PROGRAM:
+				scan_total_time = xTaskGetTickCount() - scan_last_time;
+				scan_last_time = xTaskGetTickCount();
 				execute_user_program();
 				tdma_state = TDMA_ST_MASTERTX_SLAVERX;
 				break;
@@ -464,7 +490,7 @@ void app_main()
     		"uart_interface",
 			8192,
 			NULL,
-			6, // TODO Analyze the possible use of configMAX_PRIORITIES
+			0, // TODO Analyze the possible use of configMAX_PRIORITIES
 			NULL,
 			1);
 
@@ -473,9 +499,9 @@ void app_main()
 			"tdma",
 			8192,
 			NULL,
-			5,
+			0,
 			NULL,
-			1);
+			0);
 
 //    EXAMPLE
 //    slave_ctrl[0].available_slave = true;
