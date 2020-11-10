@@ -48,7 +48,6 @@ uint8_t new_slave_address = 0;
 uint32_t scan_last_time = 0;
 uint32_t scan_total_time = 0;
 uint64_t last_msg_timedout_count = 0;
-uint64_t scan_time_mean = 0;
 uint64_t scan_time_mean_sum = 0;
 uint64_t scan_time_mean_count = 0;
 uint64_t msg_timedout_count = 0;
@@ -62,7 +61,7 @@ void lora_rx_done_callback(uint8_t* buffer_rx, int pac_size)
 		masterrx_msg = *buffer_rx;
 		new_message_arrived = true;
 	}
-	lora_receive_from_isr();
+//	lora_receive_from_isr();
 }
 
 uint8_t get_next_available_slave (uint8_t current_slave_address)
@@ -330,17 +329,17 @@ void uart_interface_task(void *p)
 					printf("##########################################\n");
 				}
 			}
-			printf("#     LAST SCAN TIME (ms):   %6u      #\n", (unsigned int)scan_total_time);
+			printf("#     SCAN LAST TIME (ms):   %6u      #\n", (unsigned int)scan_total_time);
 			printf("##########################################\n");
-			printf("#     SCAN MEAN TIME:        %6lu      #\n", (unsigned long int)scan_time_mean);
+			printf("#     SCAN MEAN TIME (ms):   %6.2f      #\n", ( (scan_time_mean_sum * 1.0) / scan_time_mean_count ) );
 			printf("##########################################\n");
-			printf("#     MSG TIMED'OUT COUNT:   %6lu      #\n", (unsigned long int)msg_timedout_count);
+			printf("#     MSG TIMED'OUT COUNT:  %7lu      #\n", (unsigned long int)msg_timedout_count);
 			printf("##########################################\n");
-			printf("#     MSG SENT COUNT:        %6lu      #\n", (unsigned long int)msg_sent_count);
+			printf("#     MSG SENT COUNT:     %9lu      #\n", (unsigned long int)msg_sent_count);
 			printf("##########################################\n");
-			printf("#     MSG LOSS %%:            %6.2f      #\n", ( ( msg_timedout_count * 100.00 ) / msg_sent_count ) );
+			printf("#     MSG LOSS (%%):          %6.2f      #\n", ( ( msg_timedout_count * 100.00 ) / msg_sent_count ) );
 			printf("##########################################\n");
-			printf("#     UPTIME (s):            %6u      #\n", (unsigned int)( (xTaskGetTickCount() - tick_start_network) / 1000 ) );
+			printf("#     UPTIME (s):         %9u      #\n", (unsigned int)( (xTaskGetTickCount() - tick_start_network) / 1000 ) );
 			printf("##########################################\n");
 			printf(LOG_RESET_COLOR);
 		}
@@ -362,8 +361,8 @@ void tdma_task(void *p)
 		memset(mastertx_msg, 0, sizeof(mastertx_msg));
 		parse_io_cmd_message(i, mastertx_msg);
 		vTaskDelay(2);
-		lora_send_packet(mastertx_msg, sizeof(mastertx_msg));
-		lora_receive();
+		lora_send_packet_with_tx_done(mastertx_msg, sizeof(mastertx_msg));
+//		lora_receive();
 		tick_timeout = xTaskGetTickCount();
 		printf("Initial scan slave %u", (unsigned int)i);
 		while (xTaskGetTickCount() - tick_timeout < pdMS_TO_TICKS(200)) {
@@ -420,10 +419,12 @@ void tdma_task(void *p)
 				}
 
 //				vTaskDelay(1);
-				lora_send_packet(mastertx_msg, sizeof(mastertx_msg));
+				lora_set_preamble_length(8);
+				lora_send_packet_with_tx_done(mastertx_msg, sizeof(mastertx_msg));
+				lora_set_preamble_length(10);
 				msg_sent_count++;
 
-				lora_receive();
+//				lora_receive();
 				tick_timeout = xTaskGetTickCount();
 				tdma_state = TDMA_ST_MASTERRX_SLAVETX;
 				break;
@@ -474,7 +475,6 @@ void tdma_task(void *p)
 				if ( last_msg_timedout_count == msg_timedout_count ) {
 					scan_time_mean_sum += (uint64_t)scan_total_time;
 					scan_time_mean_count++;
-					scan_time_mean = scan_time_mean_sum / scan_time_mean_count;
 				}
 				last_msg_timedout_count = msg_timedout_count;
 				execute_user_program();
@@ -507,6 +507,7 @@ void app_main()
 	lora_set_preamble_length(8);
 	lora_disable_crc();
 	lora_onReceive(&lora_rx_done_callback);
+	lora_onTxDone(&lora_receive_from_isr);
 
 	/* UART interface initialization */
     uart_config_t uart_config = {
