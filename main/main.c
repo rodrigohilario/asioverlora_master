@@ -212,14 +212,14 @@ void parse_received_message_from_slave (uint8_t slave_address, uint8_t message)
 
 void execute_user_program ()
 {
-	slave_ctrl[1].outputs[2] = slave_ctrl[2].inputs[0];
-	slave_ctrl[1].outputs[3] = slave_ctrl[3].inputs[1];
-
-	slave_ctrl[2].outputs[2] = slave_ctrl[3].inputs[0];
-	slave_ctrl[2].outputs[3] = slave_ctrl[1].inputs[1];
-
-	slave_ctrl[3].outputs[2] = slave_ctrl[1].inputs[0];
-	slave_ctrl[3].outputs[3] = slave_ctrl[2].inputs[1];
+//	slave_ctrl[1].outputs[2] = !slave_ctrl[1].outputs[2];
+//	slave_ctrl[1].outputs[3] = !slave_ctrl[1].outputs[3];
+//
+//	slave_ctrl[2].outputs[2] = !slave_ctrl[1].outputs[2];
+//	slave_ctrl[2].outputs[3] = !slave_ctrl[1].outputs[3];
+//
+//	slave_ctrl[3].outputs[2] = !slave_ctrl[1].outputs[2];
+//	slave_ctrl[3].outputs[3] = !slave_ctrl[1].outputs[3];
 }
 
 void uart_interface_task(void *p)
@@ -231,6 +231,7 @@ void uart_interface_task(void *p)
     uint8_t data[ UART_RX_BUFFER_SIZE + 1 ] = {0};
     int uart_rxBytes = 0;
     uint32_t last_slave_info_print_tick = xTaskGetTickCount();
+    uint32_t led_invert_tick = xTaskGetTickCount();
     uint32_t tick_start_network = xTaskGetTickCount();
 
     static const char *uart_interface_task_tag = "uart_interface_task";
@@ -344,6 +345,19 @@ void uart_interface_task(void *p)
 			printf(LOG_RESET_COLOR);
 		}
 
+		if (xTaskGetTickCount() - led_invert_tick >= pdMS_TO_TICKS(500)) {
+			led_invert_tick = xTaskGetTickCount();
+
+			slave_ctrl[1].outputs[2] = !slave_ctrl[1].outputs[2];
+			slave_ctrl[1].outputs[3] = !slave_ctrl[1].outputs[3];
+
+			slave_ctrl[2].outputs[2] = !slave_ctrl[1].outputs[2];
+			slave_ctrl[2].outputs[3] = !slave_ctrl[1].outputs[3];
+
+			slave_ctrl[3].outputs[2] = !slave_ctrl[1].outputs[2];
+			slave_ctrl[3].outputs[3] = !slave_ctrl[1].outputs[3];
+		}
+
 		vTaskDelay(1);
     }
 }
@@ -382,6 +396,13 @@ void tdma_task(void *p)
 	printf(LOG_RESET_COLOR);
 	initial_scan_done = true;
 	scan_last_time = xTaskGetTickCount();
+
+	slave_ctrl[1].outputs[2] = true;
+	slave_ctrl[1].outputs[3] = false;
+	slave_ctrl[2].outputs[2] = true;
+	slave_ctrl[2].outputs[3] = false;
+	slave_ctrl[3].outputs[2] = true;
+	slave_ctrl[3].outputs[3] = false;
 
 	for(;;) {
 		switch (tdma_state) {
